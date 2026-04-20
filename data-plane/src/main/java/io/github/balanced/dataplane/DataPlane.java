@@ -21,9 +21,12 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -68,21 +71,18 @@ public final class DataPlane implements Runnable {
     }
 
     private void eventLoop() throws IOException {
-        ConfigSnapshot config = configProvider.current();
-        MDC.put("configVersion", String.valueOf(config.version()));
+        long knownVersion = -1;
+        Map<Integer, ServerSocketChannel> activeListeners = new HashMap<>();
 
         try (Selector selector = Selector.open()) {
-            for (Listener listener : config.listeners()) {
-                ServerSocketChannel server = ServerSocketChannel.open();
-                server.configureBlocking(false);
-                server.bind(new InetSocketAddress(listener.port()));
-                server.register(selector, SelectionKey.OP_ACCEPT, listener.poolName());
-                MDC.put("pool", listener.poolName());
-                log.info("Listening on :{}", listener.port());
-                MDC.remove("pool");
-            }
-
             while (running) {
+                ConfigSnapshot config = configProvider.current();
+                if (config.version() != knownVersion) {
+                    knownVersion = config.version();
+                    MDC.put("configVersion", String.valueOf(knownVersion));
+                    reconcileListeners(selector, config, activeListeners);
+                }
+
                 selector.select(1000);
                 cleanupExpiredStickyEntries(300);
                 Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
@@ -113,7 +113,50 @@ public final class DataPlane implements Runnable {
 
             log.info("Data plane shutting down gracefully, active_connections={}", activeConnections.get());
         } finally {
+            for (ServerSocketChannel ch : activeListeners.values()) {
+                try { ch.close(); } catch (IOException ignored) {}
+            }
             MDC.clear();
+        }
+    }
+
+    private void reconcileListeners(Selector selector, ConfigSnapshot config,
+                                    Map<Integer, ServerSocketChannel> activeListeners) throws IOException {
+        Set<Integer> desiredPorts = new HashSet<>();
+        Map<Integer, String> portToPool = new HashMap<>();
+        for (Listener l : config.listeners()) {
+            desiredPorts.add(l.port());
+            portToPool.put(l.port(), l.poolName());
+        }
+        
+        var it = activeListeners.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            if (!desiredPorts.contains(entry.getKey())) {
+                MDC.put("pool", "removed");
+                log.info("Closing listener on :{}", entry.getKey());
+                MDC.remove("pool");
+                entry.getValue().close();
+                it.remove();
+            }
+        }
+
+        for (Listener listener : config.listeners()) {
+            if (activeListeners.containsKey(listener.port())) {
+                SelectionKey key = activeListeners.get(listener.port()).keyFor(selector);
+                if (key != null) {
+                    key.attach(listener.poolName());
+                }
+            } else {
+                ServerSocketChannel server = ServerSocketChannel.open();
+                server.configureBlocking(false);
+                server.bind(new InetSocketAddress(listener.port()));
+                server.register(selector, SelectionKey.OP_ACCEPT, listener.poolName());
+                activeListeners.put(listener.port(), server);
+                MDC.put("pool", listener.poolName());
+                log.info("Listening on :{}", listener.port());
+                MDC.remove("pool");
+            }
         }
     }
 
@@ -196,7 +239,7 @@ public final class DataPlane implements Runnable {
 
         stickyTimestamps.entrySet().removeIf(e ->
                 now.isAfter(e.getValue().plusSeconds(defaultTtlSeconds)));
-        // Remove sticky entries whose timestamps were evicted
+
         stickyMap.keySet().retainAll(stickyTimestamps.keySet());
     }
 
