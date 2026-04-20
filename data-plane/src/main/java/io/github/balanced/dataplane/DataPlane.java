@@ -42,7 +42,10 @@ public final class DataPlane implements Runnable {
     private final Map<InetAddress, Instant> stickyTimestamps = new ConcurrentHashMap<>();
     private Instant lastStickyCleanup = Instant.now();
 
+    private static final long CONNECT_TIMEOUT_MS = 5000;
+
     private final AtomicInteger activeConnections = new AtomicInteger();
+    private final Map<SelectionKey, Long> pendingConnects = new HashMap<>();
 
     private volatile boolean running = true;
 
@@ -85,6 +88,7 @@ public final class DataPlane implements Runnable {
 
                 selector.select(1000);
                 cleanupExpiredStickyEntries(300);
+                expireStaleConnects();
                 Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
 
                 while (keys.hasNext()) {
@@ -190,7 +194,8 @@ public final class DataPlane implements Runnable {
             upstream.connect(new InetSocketAddress(target.host(), target.port()));
 
             ConnectionPair pair = new ConnectionPair(client, upstream, target, poolName);
-            upstream.register(selector, SelectionKey.OP_CONNECT, pair);
+            SelectionKey connectKey = upstream.register(selector, SelectionKey.OP_CONNECT, pair);
+            pendingConnects.put(connectKey, System.currentTimeMillis());
 
             activeConnections.incrementAndGet();
             Counter.builder("lb_connections_total")
@@ -247,6 +252,8 @@ public final class DataPlane implements Runnable {
         SocketChannel upstream = (SocketChannel) key.channel();
         ConnectionPair pair = (ConnectionPair) key.attachment();
 
+        pendingConnects.remove(key);
+
         if (upstream.finishConnect()) {
             pair.upstreamKey = key;
             key.interestOps(SelectionKey.OP_READ);
@@ -257,6 +264,35 @@ public final class DataPlane implements Runnable {
             log.debug("Upstream connection established");
             MDC.remove("pool");
             MDC.remove("upstream");
+        }
+    }
+
+    private void expireStaleConnects() {
+        if (pendingConnects.isEmpty()) return;
+        long now = System.currentTimeMillis();
+
+        var it = pendingConnects.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            if (now - entry.getValue() > CONNECT_TIMEOUT_MS) {
+                SelectionKey key = entry.getKey();
+                it.remove();
+                ConnectionPair pair = (ConnectionPair) key.attachment();
+                MDC.put("pool", pair.poolName);
+                MDC.put("upstream", pair.upstream.address());
+                log.warn("Upstream connect timeout after {}ms", CONNECT_TIMEOUT_MS);
+                MDC.remove("pool");
+                MDC.remove("upstream");
+
+                activeConnections.decrementAndGet();
+                key.cancel();
+                try { pair.upstreamChannel.close(); } catch (IOException ignored) {}
+                try { pair.clientChannel.close(); } catch (IOException ignored) {}
+
+                Counter.builder("lb_connections_total")
+                        .tag("pool", pair.poolName).tag("status", "timeout")
+                        .register(registry).increment();
+            }
         }
     }
 
