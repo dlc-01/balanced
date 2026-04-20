@@ -1,6 +1,7 @@
 package io.github.balanced.controlplane.controller;
 
 import io.github.balanced.controlplane.controller.dto.CreatePoolRequest;
+import io.github.balanced.controlplane.controller.dto.PoolResponse;
 import io.github.balanced.controlplane.entity.PoolEntity;
 import io.github.balanced.controlplane.entity.UpstreamEntity;
 import io.github.balanced.controlplane.repository.PoolRepository;
@@ -10,6 +11,7 @@ import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,13 +42,15 @@ public class PoolController {
     }
 
     @GetMapping
-    public List<PoolEntity> list() {
-        return poolRepository.findAll();
+    @Transactional(readOnly = true)
+    public List<PoolResponse> list() {
+        return poolRepository.findAll().stream().map(PoolResponse::from).toList();
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public PoolEntity create(@Valid @RequestBody CreatePoolRequest request) {
+    @Transactional
+    public PoolResponse create(@Valid @RequestBody CreatePoolRequest request) {
         var entity = new PoolEntity();
         entity.setName(request.name());
         entity.setAlgorithm(request.algorithm());
@@ -61,7 +65,7 @@ public class PoolController {
         PoolEntity saved = poolRepository.save(entity);
         snapshotBuilder.rebuild();
         log.info("Created pool '{}' algorithm={}", saved.getName(), saved.getAlgorithm());
-        return saved;
+        return PoolResponse.from(saved);
     }
 
     @DeleteMapping("/{id}")

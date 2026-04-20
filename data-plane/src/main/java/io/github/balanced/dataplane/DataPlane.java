@@ -362,10 +362,13 @@ public final class DataPlane implements Runnable {
         try { pair.upstreamChannel.close(); } catch (IOException ignored) {}
         key.cancel();
 
-        LoadBalancer lb = balancers.get(
-                configProvider.current().pools().get(pair.poolName).algorithm());
-        if (lb instanceof LeastConnectionsBalancer lcb) {
-            lcb.onDisconnect(pair.upstream);
+        ConfigSnapshot config = configProvider.current();
+        Pool pool = config.pools().get(pair.poolName);
+        if (pool != null) {
+            LoadBalancer lb = balancers.get(pool.algorithm());
+            if (lb instanceof LeastConnectionsBalancer lcb) {
+                lcb.onDisconnect(pair.upstream);
+            }
         }
 
         log.debug("Connection closed");
