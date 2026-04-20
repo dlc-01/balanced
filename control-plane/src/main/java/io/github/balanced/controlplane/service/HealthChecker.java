@@ -89,12 +89,19 @@ public class HealthChecker {
         }
 
         if (changed) {
-            snapshotBuilder.rebuild();
+            snapshotBuilder.rebuild(unhealthyIds());
         }
     }
 
     public boolean isHealthy(Long upstreamId) {
         return healthStatus.getOrDefault(upstreamId, true);
+    }
+
+    public java.util.Set<Long> unhealthyIds() {
+        return healthStatus.entrySet().stream()
+                .filter(e -> !e.getValue())
+                .map(Map.Entry::getKey)
+                .collect(java.util.stream.Collectors.toSet());
     }
 
     private boolean probe(UpstreamEntity upstream) {

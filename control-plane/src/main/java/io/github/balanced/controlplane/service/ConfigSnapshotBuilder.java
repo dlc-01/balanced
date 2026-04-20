@@ -44,10 +44,15 @@ public class ConfigSnapshotBuilder implements ConfigProvider {
 
     @Transactional(readOnly = true)
     public void rebuild() {
+        rebuild(java.util.Set.of());
+    }
+
+    @Transactional(readOnly = true)
+    public void rebuild(java.util.Set<Long> unhealthyIds) {
         Map<String, Pool> pools = poolRepository.findAll().stream()
                 .collect(Collectors.toMap(
                         PoolEntity::getName,
-                        this::toPool
+                        entity -> toPool(entity, unhealthyIds)
                 ));
 
         var listeners = listenerRepository.findAll().stream()
@@ -62,8 +67,9 @@ public class ConfigSnapshotBuilder implements ConfigProvider {
                 version, pools.size(), listeners.size());
     }
 
-    private Pool toPool(PoolEntity entity) {
+    private Pool toPool(PoolEntity entity, java.util.Set<Long> unhealthyIds) {
         var upstreams = entity.getUpstreams().stream()
+                .filter(u -> !unhealthyIds.contains(u.getId()))
                 .map(u -> new Upstream(u.getId(), u.getHost(), u.getPort(), u.getWeight()))
                 .toList();
         return new Pool(entity.getName(), entity.getAlgorithm(),

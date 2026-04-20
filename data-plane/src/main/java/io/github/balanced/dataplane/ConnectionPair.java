@@ -3,6 +3,7 @@ package io.github.balanced.dataplane;
 import io.github.balanced.common.Upstream;
 
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 
 final class ConnectionPair {
@@ -16,6 +17,9 @@ final class ConnectionPair {
 
     final ByteBuffer clientToUpstream = ByteBuffer.allocate(BUFFER_SIZE);
     final ByteBuffer upstreamToClient = ByteBuffer.allocate(BUFFER_SIZE);
+
+    SelectionKey clientKey;
+    SelectionKey upstreamKey;
 
     ConnectionPair(SocketChannel clientChannel, SocketChannel upstreamChannel,
                    Upstream upstream, String poolName) {

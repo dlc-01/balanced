@@ -19,6 +19,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.time.Instant;
 import java.util.EnumMap;
 import java.util.Iterator;
 import java.util.List;
@@ -35,6 +36,8 @@ public final class DataPlane implements Runnable {
 
     private final Map<BalancingAlgorithm, LoadBalancer> balancers = new EnumMap<>(BalancingAlgorithm.class);
     private final Map<InetAddress, Upstream> stickyMap = new ConcurrentHashMap<>();
+    private final Map<InetAddress, Instant> stickyTimestamps = new ConcurrentHashMap<>();
+    private Instant lastStickyCleanup = Instant.now();
 
     private final AtomicInteger activeConnections = new AtomicInteger();
 
@@ -81,6 +84,7 @@ public final class DataPlane implements Runnable {
 
             while (running) {
                 selector.select(1000);
+                cleanupExpiredStickyEntries(300);
                 Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
 
                 while (keys.hasNext()) {
@@ -165,7 +169,12 @@ public final class DataPlane implements Runnable {
 
         if (pool.stickyEnabled()) {
             Upstream sticky = stickyMap.get(clientAddr);
-            if (sticky != null && healthy.contains(sticky)) {
+            Instant ts = stickyTimestamps.get(clientAddr);
+            boolean expired = ts != null &&
+                    Instant.now().isAfter(ts.plusSeconds(pool.stickyTtlSeconds()));
+
+            if (sticky != null && !expired && healthy.contains(sticky)) {
+                stickyTimestamps.put(clientAddr, Instant.now());
                 return sticky;
             }
         }
@@ -175,8 +184,20 @@ public final class DataPlane implements Runnable {
 
         if (pool.stickyEnabled()) {
             stickyMap.put(clientAddr, chosen);
+            stickyTimestamps.put(clientAddr, Instant.now());
         }
         return chosen;
+    }
+
+    private void cleanupExpiredStickyEntries(int defaultTtlSeconds) {
+        Instant now = Instant.now();
+        if (now.isBefore(lastStickyCleanup.plusSeconds(30))) return;
+        lastStickyCleanup = now;
+
+        stickyTimestamps.entrySet().removeIf(e ->
+                now.isAfter(e.getValue().plusSeconds(defaultTtlSeconds)));
+        // Remove sticky entries whose timestamps were evicted
+        stickyMap.keySet().retainAll(stickyTimestamps.keySet());
     }
 
     private void handleConnect(SelectionKey key) throws IOException {
@@ -184,8 +205,10 @@ public final class DataPlane implements Runnable {
         ConnectionPair pair = (ConnectionPair) key.attachment();
 
         if (upstream.finishConnect()) {
+            pair.upstreamKey = key;
             key.interestOps(SelectionKey.OP_READ);
-            pair.clientChannel.register(key.selector(), SelectionKey.OP_READ, pair);
+            pair.clientKey = pair.clientChannel.register(key.selector(), SelectionKey.OP_READ, pair);
+
             MDC.put("pool", pair.poolName);
             MDC.put("upstream", pair.upstream.address());
             log.debug("Upstream connection established");
@@ -200,7 +223,8 @@ public final class DataPlane implements Runnable {
 
         boolean isClient = (channel == pair.clientChannel);
         var buffer = isClient ? pair.clientToUpstream : pair.upstreamToClient;
-        SocketChannel target = isClient ? pair.upstreamChannel : pair.clientChannel;
+        SocketChannel targetChannel = isClient ? pair.upstreamChannel : pair.clientChannel;
+        SelectionKey targetKey = isClient ? pair.upstreamKey : pair.clientKey;
 
         int read = channel.read(buffer);
         if (read == -1) {
@@ -209,8 +233,18 @@ public final class DataPlane implements Runnable {
         }
 
         buffer.flip();
-        target.write(buffer);
+        int written = targetChannel.write(buffer);
         buffer.compact();
+
+        // Back-pressure: buffer has remaining data that couldn't be written
+        if (buffer.position() > 0) {
+            // Stop reading from source until we drain the buffer
+            key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
+            // Start listening for write-readiness on target
+            if (targetKey != null && targetKey.isValid()) {
+                targetKey.interestOps(targetKey.interestOps() | SelectionKey.OP_WRITE);
+            }
+        }
 
         Counter.builder("lb_bytes_total")
                 .tag("pool", pair.poolName)
@@ -219,7 +253,25 @@ public final class DataPlane implements Runnable {
     }
 
     private void handleWrite(SelectionKey key) throws IOException {
-        // TODO: implement back-pressure write handling
+        SocketChannel channel = (SocketChannel) key.channel();
+        ConnectionPair pair = (ConnectionPair) key.attachment();
+
+        boolean isUpstream = (channel == pair.upstreamChannel);
+        // We're writing TO this channel, so use the buffer that flows toward it
+        var buffer = isUpstream ? pair.clientToUpstream : pair.upstreamToClient;
+        SelectionKey sourceKey = isUpstream ? pair.clientKey : pair.upstreamKey;
+
+        buffer.flip();
+        channel.write(buffer);
+        buffer.compact();
+
+        // Buffer fully drained — resume reading from source, stop write interest
+        if (buffer.position() == 0) {
+            key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
+            if (sourceKey != null && sourceKey.isValid()) {
+                sourceKey.interestOps(sourceKey.interestOps() | SelectionKey.OP_READ);
+            }
+        }
     }
 
     private void closeConnection(ConnectionPair pair, SelectionKey key) {
