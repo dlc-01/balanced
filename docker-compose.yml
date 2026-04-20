@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: balanced
+      POSTGRES_USER: balanced
+      POSTGRES_PASSWORD: balanced
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  loadbalancer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: balanced
+      DB_USER: balanced
+      DB_PASS: balanced
+    depends_on:
+      - postgres
+
+  upstream1:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    environment:
+      SERVER_PORT: 9001
+    ports:
+      - "9001:9001"
+
+  upstream2:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    environment:
+      SERVER_PORT: 9001
+    ports:
+      - "9002:9001"
+
+  upstream3:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    environment:
+      SERVER_PORT: 9001
+    ports:
+      - "9003:9001"
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  pg_data:

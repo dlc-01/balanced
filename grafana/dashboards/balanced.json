@@ -1,0 +1,34 @@
+{
+  "dashboard": {
+    "title": "Balanced — TCP Load Balancer",
+    "uid": "balanced-main",
+    "panels": [
+      {
+        "title": "Active Connections",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+        "targets": [{"expr": "lb_active_connections", "legendFormat": "active"}]
+      },
+      {
+        "title": "Connections Total",
+        "type": "graph",
+        "gridPos": {"h": 6, "w": 9, "x": 6, "y": 0},
+        "targets": [{"expr": "rate(lb_connections_total[1m])", "legendFormat": "{{pool}} {{status}}"}]
+      },
+      {
+        "title": "Bytes Total",
+        "type": "graph",
+        "gridPos": {"h": 6, "w": 9, "x": 15, "y": 0},
+        "targets": [{"expr": "rate(lb_bytes_total[1m])", "legendFormat": "{{pool}} {{direction}}"}]
+      },
+      {
+        "title": "Upstream Health",
+        "type": "table",
+        "gridPos": {"h": 6, "w": 24, "x": 0, "y": 6},
+        "targets": [{"expr": "lb_upstream_health", "legendFormat": "{{upstream}}", "instant": true}]
+      }
+    ],
+    "time": {"from": "now-15m", "to": "now"},
+    "refresh": "5s"
+  }
+}
